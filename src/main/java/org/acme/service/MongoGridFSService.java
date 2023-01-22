@@ -21,46 +21,43 @@ import org.bson.types.ObjectId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.*;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.file.Path;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.*;
 
 /**
- * Service which communicates with a MongoGridFs server to store/retrive files
+ * Service which communicates with a MongoGridFs server to store/retrieve files
  *
  * @author tmulle
  */
 public class MongoGridFSService {
 
     private final static Logger LOG = LoggerFactory.getLogger(MongoGridFSService.class);
-
-    // Communicates with the Grid itself
-    private GridFSBucket gridFSBucket;
-
     // Holds the database name
     private final String databaseName;
-
     // Holds the files bucket name
     private final String bucketName;
-
     // Holds the chunk size to send files
     private final Integer chunkSize;
-
     // Holds the MongoClient
     private final MongoClient client;
-
     // Holds the database
     private final MongoDatabase database;
+    // Communicates with the Grid itself
+    private GridFSBucket gridFSBucket;
 
     /**
      * Constructor
      *
-     * @param databaseName Database name
+     * @param databaseName   Database name
      * @param fileBucketName Name of the bucket to use for files
-     * @param fileChunkSize Size of chunks to split file
-     * @param client MongoDb Client
+     * @param fileChunkSize  Size of chunks to split file
+     * @param client         MongoDb Client
      */
     public MongoGridFSService(String databaseName,
                               String fileBucketName,
@@ -70,11 +67,12 @@ public class MongoGridFSService {
         database = client.getDatabase(databaseName);
         if (fileBucketName != null && !fileBucketName.isEmpty()) {
             gridFSBucket = GridFSBuckets.create(database, fileBucketName);
+            this.bucketName = fileBucketName;
         } else {
             gridFSBucket = GridFSBuckets.create(database);
+            this.bucketName = gridFSBucket.getBucketName();
         }
 
-        this.bucketName = fileBucketName;
         this.chunkSize = fileChunkSize;
         this.databaseName = databaseName;
         this.client = client;
@@ -82,17 +80,21 @@ public class MongoGridFSService {
 
     /**
      * Upload to Grid
+     * <p>
+     * We automatically calculate a SHA-256 hash on the file during
+     * upload and store it in the metadata as "sha256"
      *
-     * @param file Path of the file
+     * @param file     Path of the file
+     * @param metaData Extra information stored with the file
      * @return ObjectId of new file
      */
-    public ObjectId uploadFile(Path file, String fileName, String ticketNumber) {
+    public ObjectId uploadFile(Path file, String fileName, Map<String, Object> metaData) {
         Objects.requireNonNull(file, "Path is required");
         Objects.requireNonNull(fileName, "Filename is required");
 
         try {
-            InputStream inputStream = new MarkableFileInputStream(new FileInputStream(file.toFile()));
-            return uploadFile(inputStream, fileName, ticketNumber);
+            MarkableFileInputStream fileInputStream = new MarkableFileInputStream(new FileInputStream(file.toFile()));
+            return uploadFile(fileInputStream, fileName, metaData);
         } catch (FileNotFoundException e) {
             throw new RuntimeException("File not found: " + file.toFile(), e);
         }
@@ -102,14 +104,18 @@ public class MongoGridFSService {
 
     /**
      * Upload file to Mongo GridFS
+     * <p>
+     * We automatically generate a sha-256 hash and store it in the meta data
+     * under the key "sha256"
      *
-     * @param inputStream
+     * @param inputStream Inputstream to the data
      * @param fileName
+     * @param metaData    and extran information you want to store
      * @return ObjectId of uploaded file
      */
-    public ObjectId uploadFile(InputStream inputStream, String fileName, String ticketNumber) {
+    public ObjectId uploadFile(MarkableFileInputStream inputStream, String fileName, Map<String, Object> metaData) {
 
-        Objects.requireNonNull(inputStream, "InputStream is required");
+        Objects.requireNonNull(inputStream, "MarkableFileInputStream is required");
         Objects.requireNonNull(fileName, "Filename is required");
 
 
@@ -130,19 +136,26 @@ public class MongoGridFSService {
 
         // We are unique
         // Create the meta
-        Document metaData = new Document();
-        metaData.append("sha256", sha256);
+        Document metaDoc = new Document();
+        metaDoc.append("sha256", sha256);
 
-        // Append ticket number if supplied
-        if (ticketNumber != null && !ticketNumber.isEmpty()) {
-            metaData.append("ticketNumber", ticketNumber);
+        // Add any meta information
+        // we don't allow the sha256 to be overriden
+        if (metaData != null) {
+            metaData.entrySet().forEach(entry -> {
+                if (!"sha256".equalsIgnoreCase(entry.getKey())) {
+                    metaDoc.append(entry.getKey(), entry.getValue());
+                }
+            });
         }
 
         try {
             // Create the options
-            GridFSUploadOptions options = new GridFSUploadOptions()
-                    .chunkSizeBytes(chunkSize)
-                    .metadata(metaData);
+            GridFSUploadOptions options = new GridFSUploadOptions();
+            if (chunkSize != null) {
+                options = options.chunkSizeBytes(chunkSize);
+            }
+            options = options.metadata(metaDoc);
 
             // Upload to server
             return gridFSBucket.uploadFromStream(fileName, inputStream, options);
@@ -244,6 +257,16 @@ public class MongoGridFSService {
      */
     public void deleteFile(String id) {
         Objects.requireNonNull(id, "Id is required");
+
+        // Perform check so we can throw our own exception
+        // Mongo only throws a generic  com.mongodb.MongoGridFSException
+        // with string messaes and I want to keep out exceptions consistent
+        // with simplified wording
+        if (!fileIDExists(id)) {
+            throw new InvalidRequestException("ID " + id + " does not exist");
+        }
+
+        // Delete the file
         gridFSBucket.delete(parseObjectId(id));
     }
 
@@ -257,6 +280,15 @@ public class MongoGridFSService {
         Objects.requireNonNull(id, "Id is required");
         Objects.requireNonNull(outputStream, "OutputStream is required");
 
+        // Perform check so we can throw our own exception
+        // Mongo only throws a generic  com.mongodb.MongoGridFSException
+        // with string messaes and I want to keep out exceptions consistent
+        // with simplified wording
+        if (!fileIDExists(id)) {
+            throw new InvalidRequestException("ID " + id + " does not exist");
+        }
+
+        // Download the stream
         gridFSBucket.downloadToStream(parseObjectId(id), outputStream);
     }
 
@@ -266,23 +298,27 @@ public class MongoGridFSService {
      * @param id ObjectId hash
      * @return Optional with a FileInfo
      */
-    public Optional<FileInfo> getFileInfo(String id) {
+    public FileInfo getFileInfo(String id) {
         Objects.requireNonNull(id, "Id is required");
 
         Bson bson = Filters.eq("_id", parseObjectId(id));
         GridFSFile file = gridFSBucket.find(bson).first();
 
-        FileInfo info = null;
-        if (file != null) {
-            info = new FileInfo();
-            info.filename = file.getFilename();
-            info.length = file.getLength();
-            info.uploadDate = file.getUploadDate();
-            info.id = file.getObjectId().toString();
-            info.metaData = file.getMetadata();
+        // If not found, throw
+        if (file == null) {
+            throw new InvalidRequestException("ID " + id + " does not exist");
         }
 
-        return Optional.ofNullable(info);
+        // Build the info
+        FileInfo info = new FileInfo();
+        info.filename = file.getFilename();
+        info.length = file.getLength();
+        info.uploadDate = file.getUploadDate();
+        info.id = file.getObjectId().toString();
+        info.metaData = file.getMetadata();
+
+        return info;
+
     }
 
     /**
@@ -293,7 +329,21 @@ public class MongoGridFSService {
      */
     public boolean hashExists(String hash) {
         Objects.requireNonNull(hash, "Hash is required");
-        long count = database.getCollection("fs.files").countDocuments(Filters.eq("metadata.sha256", hash));
+        long count = database.getCollection(bucketName + ".files").countDocuments(Filters.eq("metadata.sha256", hash));
+        return count > 0;
+    }
+
+    /**
+     * Returns if a file id is already stored in the db
+     *
+     * @param id ObjectId
+     * @return true or false
+     */
+    public boolean fileIDExists(String id) {
+        Objects.requireNonNull(id, "ID is required");
+        ObjectId objectId = parseObjectId(id);
+        long count = database.getCollection(bucketName + ".files")
+                .countDocuments(Filters.eq("_id", objectId));
         return count > 0;
     }
 
@@ -303,7 +353,7 @@ public class MongoGridFSService {
      * @return
      */
     public long totalFileCount() {
-        return database.getCollection("fs.files").countDocuments();
+        return database.getCollection(bucketName + ".files").countDocuments();
     }
 
 

@@ -9,6 +9,9 @@ import java.nio.channels.FileChannel;
  * Used to reset a fileinput stream so we can reread
  * from the stream without having to create a new stream
  *
+ * Modified from original:
+ * https://stackoverflow.com/questions/1094703/java-file-input-with-rewind-reset-capability
+ *
  */
 public class MarkableFileInputStream extends FilterInputStream {
     private FileChannel myFileChannel;
