@@ -207,6 +207,9 @@ public class MongoGridFSService {
             // Sort direction
             sortDir = parseSortingDirection(queryParams);
 
+            // filename
+            parseFilename(queryParams,filters);
+
             // Build the filter chain
             if (!filters.isEmpty()) {
                 query = Filters.and(filters);
@@ -247,6 +250,19 @@ public class MongoGridFSService {
         });
 
         return items;
+    }
+
+    /**
+     * Add filename filter if requested
+     *
+     * @param queryParams Incoming params
+     * @param filters Filter list to add filter
+     */
+    private void parseFilename(Map<String, String> queryParams, List<Bson> filters) {
+        String filename = queryParams.get("filename");
+        if (filename != null && !filename.isEmpty()) {
+            filters.add(Filters.eq("filename", filename));
+        }
     }
 
 
@@ -344,6 +360,19 @@ public class MongoGridFSService {
         ObjectId objectId = parseObjectId(id);
         long count = database.getCollection(bucketName + ".files")
                 .countDocuments(Filters.eq("_id", objectId));
+        return count > 0;
+    }
+
+    /**
+     * Returns if a filename is already stored in the db
+     *
+     * @param filename Name of the file
+     * @return true or false
+     */
+    public boolean filenameExists(String filename) {
+        Objects.requireNonNull(filename, "Filename is required");
+        long count = database.getCollection(bucketName + ".files")
+                .countDocuments(Filters.eq("filename", filename));
         return count > 0;
     }
 
