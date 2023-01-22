@@ -546,7 +546,6 @@ public class MongoGridFSService {
      */
     @NoArgsConstructor
     @Getter
-    @RegisterForReflection
     public static class FileInfo {
 
         String id;
