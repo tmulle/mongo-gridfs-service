@@ -8,13 +8,16 @@ import com.mongodb.client.gridfs.GridFSFindIterable;
 import com.mongodb.client.gridfs.model.GridFSFile;
 import com.mongodb.client.gridfs.model.GridFSUploadOptions;
 import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.IndexOptions;
+import com.mongodb.client.model.Indexes;
 import com.mongodb.client.model.Sorts;
-import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import org.acme.exceptions.InvalidRequestException;
-import org.acme.util.MarkableFileInputStream;
-import org.apache.commons.codec.digest.DigestUtils;
+
+import org.acme.util.FileHasher;
+import org.acme.util.RewindableFileInputStream;
 import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.bson.types.ObjectId;
@@ -76,6 +79,19 @@ public class MongoGridFSService {
         this.chunkSize = fileChunkSize;
         this.databaseName = databaseName;
         this.client = client;
+
+        ensureSha256Index();
+    }
+
+    /**
+     * Creates an index on metadata.sha256 for fast duplicate detection.
+     */
+    private void ensureSha256Index() {
+        database.getCollection(bucketName + ".files")
+                .createIndex(
+                        Indexes.ascending("metadata.sha256"),
+                        new IndexOptions().name("sha256_unique_idx").unique(false)
+                );
     }
 
     /**
@@ -93,7 +109,7 @@ public class MongoGridFSService {
         Objects.requireNonNull(fileName, "Filename is required");
 
         try {
-            MarkableFileInputStream fileInputStream = new MarkableFileInputStream(new FileInputStream(file.toFile()));
+            RewindableFileInputStream fileInputStream = new RewindableFileInputStream(new FileInputStream(file.toFile()), true);
             return uploadFile(fileInputStream, fileName, metaData);
         } catch (FileNotFoundException e) {
             throw new RuntimeException("File not found: " + file.toFile(), e);
@@ -113,17 +129,16 @@ public class MongoGridFSService {
      * @param metaData    and extran information you want to store
      * @return ObjectId of uploaded file
      */
-    public ObjectId uploadFile(MarkableFileInputStream inputStream, String fileName, Map<String, Object> metaData) {
+    public ObjectId uploadFile(RewindableFileInputStream inputStream, String fileName, Map<String, Object> metaData) {
 
-        Objects.requireNonNull(inputStream, "MarkableFileInputStream is required");
+        Objects.requireNonNull(inputStream, "RewindableFileInputStream is required");
         Objects.requireNonNull(fileName, "Filename is required");
 
 
         // Generate a hash and store in metadata
         String sha256 = null;
         try {
-            sha256 = DigestUtils.sha256Hex(inputStream);
-            inputStream.mark(0); //reset stream
+            sha256 = FileHasher.computeHash(inputStream.getFileChannel(), "SHA-256");
             inputStream.reset();
         } catch (IOException ex) {
             throw new RuntimeException("Error generating hash for file", ex);
@@ -153,9 +168,10 @@ public class MongoGridFSService {
             // Create the options
             GridFSUploadOptions options = new GridFSUploadOptions();
             if (chunkSize != null) {
-                options = options.chunkSizeBytes(chunkSize);
+                options.chunkSizeBytes(chunkSize);
             }
-            options = options.metadata(metaDoc);
+
+            options.metadata(metaDoc);
 
             // Upload to server
             return gridFSBucket.uploadFromStream(fileName, inputStream, options);
